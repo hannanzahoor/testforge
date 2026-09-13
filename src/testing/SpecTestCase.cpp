@@ -9,6 +9,7 @@
 #include "testforge/testing/Assertions.hpp"
 #include "testforge/testing/TestRegistry.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace testforge {

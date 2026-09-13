@@ -850,20 +850,31 @@ TEST_F(RunnerFixture, AnOrphanedTestMayOutliveTheConfigThatStartedIt) {
 TEST_F(RunnerFixture, RunCancellationReachesATestWithNoDeadline) {
     config.execution.defaultTimeoutMs = 0;  // unbounded: executes inline
 
+    std::atomic<bool> bodyRunning{false};
     std::atomic<bool> observedCancellation{false};
-    add("s", "unbounded_cooperative", [&observedCancellation](TestContext& ctx) {
+    add("s", "unbounded_cooperative", [&bodyRunning, &observedCancellation](TestContext& ctx) {
+        bodyRunning.store(true, std::memory_order_release);
+        // sleepFor returns false when the wait ended because of cancellation,
+        // so the observation and the exit come from a single read.
         for (int i = 0; i < 600; ++i) {
-            if (ctx.cancellation().isCancelled()) {
-                observedCancellation.store(true);
+            if (!ctx.sleepFor(Milliseconds{10})) {
+                observedCancellation.store(true, std::memory_order_release);
+                break;
             }
-            ctx.throwIfCancelled();
-            (void)ctx.sleepFor(Milliseconds{10});
         }
+        ctx.throwIfCancelled();
     });
 
     TestRunner runner(config, TestRegistry::instance());
-    std::thread canceller([&runner] {
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    // Cancel once the body is actually running, rather than on a timer. A
+    // fixed delay races the runner's own start-up: under a sanitizer the timer
+    // can expire first, the run is cancelled before runOne() is reached, and
+    // the test is skipped without its body ever executing -- which is not the
+    // path this test exists to cover.
+    std::thread canceller([&runner, &bodyRunning] {
+        while (!bodyRunning.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         runner.requestCancellation("interrupted by signal");
     });
 

@@ -4,6 +4,7 @@
 #include "testforge/core/StringUtils.hpp"
 #include "testforge/net/Url.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace testforge {

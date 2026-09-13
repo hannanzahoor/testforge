@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <thread>
