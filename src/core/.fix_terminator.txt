@@ -1,0 +1,3 @@
+bool isValueTerminator(char c) noexcept {
+    return c == '"' || c == ',' || c == '\n' || c == '\r' || c == '}' || c == '&';
+}

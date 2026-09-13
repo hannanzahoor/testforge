@@ -1,0 +1,233 @@
+# The test pipeline.
+#
+# Four jobs, in rough order of how quickly they tell you something useful:
+#
+#   unit         TestForge's own GoogleTest suite. Fast, no services.
+#   integration  The engine against the live sample service, over real HTTP.
+#   sanitizers   The same suite under ASan/UBSan and TSan. Slow, so it runs in
+#                parallel rather than gating the others.
+#   python       The sample service's pytest suite and the AI evaluation
+#                harness in offline mode.
+
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit and failure injection
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps-cache
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTESTFORGE_BUILD_TESTS=ON
+          cmake --build build --parallel
+
+      - name: Run the suite
+        run: ctest --test-dir build --output-on-failure --timeout 180
+
+      - name: Verify the failure-injection suite actually fails
+        run: |
+          # A test tool that cannot detect a failure is worse than no tool.
+          # This asserts the *negative*: the injected suite must exit 1, and it
+          # must produce the categories it advertises.
+          set +e
+          ./build/testforge run --suite failure_injection --no-color --json --no-report \
+            > /tmp/injected.json
+          code=$?
+          set -e
+          if [ "$code" != "1" ]; then
+            echo "expected exit code 1 (tests failed), got $code"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, sys
+          run = json.load(open("/tmp/injected.json"))
+          seen = {r["failure_category"] for r in run["results"]}
+          required = {"ASSERTION_FAILURE", "TIMEOUT", "NETWORK_FAILURE",
+                      "DEPENDENCY_FAILURE", "ENVIRONMENT_FAILURE",
+                      "RESOURCE_FAILURE", "CONFIGURATION_FAILURE"}
+          missing = required - seen
+          if missing:
+              print("failure-injection suite did not produce:", sorted(missing))
+              sys.exit(1)
+          print("classified categories:", sorted(seen))
+          PY
+
+  integration:
+    name: integration against the sample service
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps-cache
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build --parallel
+
+      - name: Start the sample service
+        run: |
+          pip install --requirement sample-service/requirements.txt
+          nohup uvicorn app.main:app --port 8000 --app-dir sample-service \
+            > /tmp/sample-service.log 2>&1 &
+          # Poll rather than sleep: a fixed sleep is either too short on a slow
+          # runner or wasted time on a fast one.
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8000/health > /dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8000/health
+
+      - name: Run the API suite
+        run: ./build/testforge run --suite api --workers 4 --no-color
+
+      - name: Run everything except the deliberate failures
+        run: ./build/testforge run --exclude-suite failure_injection --workers 4 --no-color
+
+      - name: Summarise for the job page
+        if: always()
+        run: python3 -m python.tools.summarize_reports 'reports/*.json' --github-summary
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testforge-reports
+          path: reports/
+          retention-days: 14
+
+      - name: Upload the service log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sample-service-log
+          path: /tmp/sample-service.log
+
+  sanitizers:
+    name: ${{ matrix.sanitizer }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # ASan and TSan cannot be combined, so they are separate cells.
+        sanitizer: [asan-ubsan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps-cache
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.sanitizer }}" = "tsan" ]; then
+            FLAGS="-DTESTFORGE_SANITIZE_THREAD=ON"
+          else
+            FLAGS="-DTESTFORGE_SANITIZE_ADDRESS=ON -DTESTFORGE_SANITIZE_UB=ON"
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DTESTFORGE_BUILD_TESTS=ON $FLAGS
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run the suite
+        env:
+          # halt_on_error keeps the first report from being buried under the
+          # cascade that usually follows it.
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          # The suppressions file covers only mutex-lifecycle false
+          # positives from libstdc++'s constexpr-initialised std::mutex.
+          # Data races are never suppressed; see .tsan-suppressions.
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1:suppressions=${{ github.workspace }}/.tsan-suppressions
+        run: ctest --test-dir build --output-on-failure --timeout 600
+
+  python:
+    name: python
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          pip install --requirement sample-service/requirements.txt
+          pip install --requirement python/requirements.txt
+
+      - name: Sample-service test-suite
+        run: pytest sample-service/tests -q
+
+      - name: Lint
+        run: ruff check python/ sample-service/
+
+      - name: Build the engine (needed by the evaluation harness)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTESTFORGE_BUILD_TESTS=OFF
+          cmake --build build --parallel
+
+      - name: Evaluate AI generation (offline, deterministic provider)
+        # No API key in CI: the mock provider exercises the whole
+        # generate -> validate -> score path with stable numbers.
+        run: |
+          python -m python.evaluation.evaluate_generation \
+            --mock --testforge ./build/testforge --output /tmp/ai-eval.json
+
+      - name: Upload the evaluation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-evaluation
+          path: /tmp/ai-eval.json
+          retention-days: 14

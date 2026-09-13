@@ -1,0 +1,83 @@
+{
+  "_comment": [
+    "Default TestForge configuration.",
+    "Precedence, lowest to highest: built-in defaults, this file, TESTFORGE_* environment",
+    "variables, command-line flags. Secrets are never read from here - OPENAI_API_KEY and",
+    "friends come from the environment only (see .env.example)."
+  ],
+
+  "execution": {
+    "workers": 0,
+    "default_timeout_ms": 30000,
+    "cancellation_grace_ms": 2000,
+    "fail_fast": false,
+    "retry_failed": 0,
+    "shuffle": false,
+    "shuffle_seed": 0,
+    "exclude_suites_by_default": ["failure_injection"]
+  },
+
+  "logging": {
+    "level": "info",
+    "json": false,
+    "color": true,
+    "file": ""
+  },
+
+  "database": {
+    "enabled": true,
+    "path": "testforge.db",
+    "retention_days": 90,
+    "busy_timeout_ms": 5000
+  },
+
+  "reporting": {
+    "output_directory": "reports",
+    "console": true,
+    "json": true,
+    "html": true,
+    "junit": false,
+    "verbose_failures": true
+  },
+
+  "api": {
+    "base_url": "http://127.0.0.1:8000",
+    "timeout_ms": 10000,
+    "sla_ms": 2000,
+    "default_headers": {
+      "Accept": "application/json"
+    }
+  },
+
+  "ai": {
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:8810",
+    "model": "gpt-4o-mini",
+    "timeout_ms": 60000,
+    "max_generated_tests": 25,
+    "max_response_bytes": 524288,
+    "allowed_target_hosts": []
+  },
+
+  "diagnostics": {
+    "collect_on_failure": true,
+    "include_gpu": true,
+    "include_processes": false,
+    "include_system_logs": false,
+    "top_process_count": 10,
+    "command_timeout_ms": 4000
+  },
+
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "workers": 4,
+    "static_directory": "dashboard",
+    "max_request_bytes": 1048576,
+    "max_pending_connections": 256
+  },
+
+  "custom": {
+    "_comment": "Free-form values, reachable from a test via ctx.configValue(\"a.b\")."
+  }
+}

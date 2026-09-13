@@ -1,0 +1,170 @@
+# Static analysis and hygiene.
+#
+# Separate from tests.yml because these are advisory-to-blocking in different
+# ways: formatting and secret scanning must block, while clang-tidy on a large
+# checkout produces enough noise that treating every finding as fatal would
+# make people stop reading it.
+
+name: quality
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: clang-format
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang-format-14
+
+      - name: Check formatting
+        run: |
+          # Blocking: formatting is mechanical, so a diff here means someone
+          # skipped a step rather than made a judgement call.
+          files=$(find include src tests examples benchmarks \
+                    -name '*.cpp' -o -name '*.hpp' | sort)
+          clang-format-14 --dry-run --Werror $files
+
+  tidy:
+    name: clang-tidy
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang-tidy-14 ninja-build
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps-cache
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Generate the compilation database
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DTESTFORGE_BUILD_TESTS=OFF
+          # The vendored SQLite amalgamation is third-party C we are not going
+          # to fix; analysing it would bury our own findings.
+          python3 - <<'PY'
+          import json
+          entries = json.load(open("build/compile_commands.json"))
+          kept = [e for e in entries if "sqlite3.c" not in e["file"]]
+          json.dump(kept, open("build/compile_commands.json", "w"), indent=1)
+          print(f"analysing {len(kept)} translation units")
+          PY
+
+      - name: Run clang-tidy
+        # Advisory: reported in the log and the job summary, not a gate. The
+        # checks that must never regress are enforced by the compiler with
+        # -Werror in build.yml instead.
+        continue-on-error: true
+        run: |
+          find src include -name '*.cpp' -o -name '*.hpp' \
+            | xargs -P 4 -I{} clang-tidy-14 -p build --quiet {} 2>&1 \
+            | tee /tmp/tidy.log || true
+          echo "## clang-tidy" >> "$GITHUB_STEP_SUMMARY"
+          count=$(grep -c "warning:" /tmp/tidy.log || true)
+          echo "$count warning(s). Advisory — see the job log." >> "$GITHUB_STEP_SUMMARY"
+
+  secrets:
+    name: no committed secrets
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for credential shapes
+        run: |
+          # Blocking, and deliberately simple. A committed key is not a style
+          # question. .env.example is excluded: it is a template of empty keys.
+          #
+          # One complication is unavoidable here. Redacting secrets from logs
+          # and reports is one of the things TestForge does, so its tests must
+          # feed it realistic secret-shaped input. Those fixtures are marked
+          # NOT-A-SECRET, either on the line itself or on the line directly
+          # above it -- the second form exists because an inline comment on a
+          # wrapped line pushes it past the column limit and would then fail
+          # the clang-format job instead.
+          #
+          # The exemption is per occurrence, not per directory, on purpose:
+          # excluding tests/ would also hide a real key committed in a test.
+          # Every exemption stays greppable, and the count is printed, so an
+          # unexplained increase shows up in review.
+          python3 - <<'SCAN'
+          import re, sys
+          from pathlib import Path
+
+          PATTERN = re.compile(
+              r"sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xoxb-[A-Za-z0-9-]{20,}"
+              r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+          SKIP_DIRS = {".git", ".deps-cache", "build", "reports", "__pycache__",
+                       ".ruff_cache", ".pytest_cache", "node_modules"}
+
+          hits, exempt = [], 0
+          for path in Path(".").rglob("*"):
+              if not path.is_file() or path.name == ".env.example":
+                  continue
+              if SKIP_DIRS & set(path.parts):
+                  continue
+              try:
+                  lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+              except OSError:
+                  continue
+              for i, line in enumerate(lines):
+                  if not PATTERN.search(line):
+                      continue
+                  above = lines[i - 1] if i else ""
+                  if "NOT-A-SECRET" in line or "NOT-A-SECRET" in above:
+                      exempt += 1
+                  else:
+                      hits.append(f"{path}:{i + 1}:{line.strip()[:120]}")
+
+          if hits:
+              print("possible committed credential:")
+              print("\\n".join(hits))
+              print()
+              print("If this is a deliberate test fixture, mark the line NOT-A-SECRET,")
+              print("or put that marker on the line directly above it.")
+              sys.exit(1)
+          print("no credential-shaped strings found")
+          print(f"({exempt} occurrence(s) explicitly marked NOT-A-SECRET)")
+          SCAN
+
+      - name: Ensure .env is not tracked
+        run: |
+          if git ls-files --error-unmatch .env > /dev/null 2>&1; then
+            echo ".env is tracked by git; it must not be"
+            exit 1
+          fi
+          echo ".env is not tracked"
+
+  python-lint:
+    name: ruff
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Pinned to the same range as python/requirements.txt. An unpinned
+      # `pip install ruff` makes this job fail on the day ruff widens its
+      # default rule set, for a commit that changed nothing.
+      - run: pip install "ruff>=0.4,<0.13"
+      # Rule selection and target-version live in pyproject.toml, so this
+      # result does not depend on which ruff happens to be installed.
+      - run: ruff check python/ sample-service/
+      - run: ruff format --check python/ sample-service/

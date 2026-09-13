@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TestForge Dashboard</title>
+<!--
+  Deliberately a single file with no build step and no dependencies.
+
+  A React + Vite dashboard would need node, a package install, a bundler and a
+  lockfile to look at four numbers and a table. The engineering value of this
+  project is in the C++ engine; the dashboard's job is to make that engine's
+  output visible, and it does that with ~200 lines of plain JavaScript that the
+  C++ server can serve straight from disk. See docs/design-decisions.md.
+
+  It talks to the same REST API documented in docs/architecture.md, so it works
+  against any TestForge instance:  testforge serve --port 8080
+-->
+<style>
+:root{
+  --bg:#0f1116;--panel:#171a21;--line:#262b36;--fg:#e6e8ee;--muted:#9aa3b2;
+  --pass:#3fb950;--fail:#f85149;--skip:#8b949e;--err:#bc8cff;--time:#d29922;
+  --accent:#58a6ff;
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f6f8fa;--panel:#fff;--line:#d8dee4;--fg:#1f2328;--muted:#59636e;
+    --pass:#1a7f37;--fail:#cf222e;--skip:#6e7781;--err:#8250df;--time:#9a6700;
+    --accent:#0969da;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{border-bottom:1px solid var(--line);background:var(--panel)}
+.bar{max-width:1200px;margin:0 auto;padding:14px 20px;display:flex;align-items:center;gap:16px;
+  flex-wrap:wrap}
+h1{font-size:17px;margin:0;font-weight:650;letter-spacing:-.01em}
+h2{font-size:15px;margin:32px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.spacer{flex:1}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--skip);display:inline-block;
+  margin-right:6px;vertical-align:1px}
+.dot.up{background:var(--pass)}.dot.down{background:var(--fail)}
+main{max-width:1200px;margin:0 auto;padding:24px 20px 80px}
+button,select,input{font:inherit;color:var(--fg);background:var(--bg);
+  border:1px solid var(--line);border-radius:6px;padding:5px 10px}
+button{cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+.card .n{font-size:26px;font-weight:650;line-height:1.1;font-variant-numeric:tabular-nums}
+.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em;
+  margin-top:4px}
+.pass{color:var(--pass)}.fail{color:var(--fail)}.skip{color:var(--skip)}
+.err{color:var(--err)}.time{color:var(--time)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;
+  letter-spacing:.04em}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.clickable{cursor:pointer}
+tr.clickable:hover{background:var(--bg)}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11px;font-weight:650;
+  border:1px solid currentColor;white-space:nowrap}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;
+  overflow-x:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  white-space:pre-wrap;word-break:break-word;margin:8px 0 0}
+.muted{color:var(--muted)}
+.small{font-size:12px}
+.trend{display:flex;align-items:flex-end;gap:3px;height:72px;margin-top:8px}
+.trend .col{flex:1;min-width:4px;display:flex;flex-direction:column;justify-content:flex-end;
+  border-radius:2px 2px 0 0;overflow:hidden;background:var(--line)}
+.trend .col span{display:block;width:100%}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+.err-box{border:1px solid var(--fail);border-radius:8px;padding:12px 14px;color:var(--fail);
+  background:var(--panel)}
+details{margin-top:8px}
+summary{cursor:pointer;color:var(--muted)}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>TestForge</h1>
+    <span class="small muted"><span id="conn" class="dot"></span><span id="conn-text">connecting…</span></span>
+    <span class="spacer"></span>
+    <label class="small muted">runs
+      <select id="run-limit">
+        <option value="10">10</option>
+        <option value="25" selected>25</option>
+        <option value="100">100</option>
+      </select>
+    </label>
+    <button id="refresh">Refresh</button>
+    <button id="run-smoke" class="primary">Run smoke suite</button>
+  </div>
+</header>
+
+<main>
+  <div id="error" class="err-box" hidden></div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="grid2">
+    <section>
+      <h2>Pass rate over recent runs</h2>
+      <div class="panel">
+        <div class="trend" id="trend"></div>
+        <div class="small muted" id="trend-caption">oldest on the left</div>
+      </div>
+    </section>
+    <section>
+      <h2>Failure categories</h2>
+      <div class="panel scroll"><table id="categories"><tbody></tbody></table></div>
+    </section>
+  </div>
+
+  <h2>Recent runs</h2>
+  <div class="panel scroll"><table id="runs"><tbody></tbody></table></div>
+
+  <h2 id="results-heading">Results</h2>
+  <div class="panel scroll"><table id="results"><tbody></tbody></table></div>
+
+  <div class="grid2">
+    <section>
+      <h2>Top failing tests</h2>
+      <div class="panel scroll"><table id="top-failing"><tbody></tbody></table></div>
+    </section>
+    <section>
+      <h2>Flaky candidates <span class="small muted">(heuristic)</span></h2>
+      <div class="panel scroll"><table id="flaky"><tbody></tbody></table></div>
+    </section>
+  </div>
+
+  <h2>System diagnostics</h2>
+  <div class="panel" id="diagnostics"><span class="muted">loading…</span></div>
+</main>
+
+<script>
+"use strict";
+
+// The dashboard is served from the same origin as the API, so a relative base
+// works. Override with ?api=http://host:port when serving it from elsewhere.
+const API = new URLSearchParams(location.search).get("api") || "";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const STATUS_CLASS = { PASSED: "pass", FAILED: "fail", SKIPPED: "skip", ERROR: "err", TIMEOUT: "time" };
+
+let state = { runs: [], selectedRun: null };
+
+async function api(path, options) {
+  const response = await fetch(API + path, options);
+  if (!response.ok && response.status >= 500) {
+    throw new Error(`${path} returned ${response.status}`);
+  }
+  return response.json();
+}
+
+function showError(message) {
+  const box = $("error");
+  if (!message) { box.hidden = true; return; }
+  box.hidden = false;
+  box.textContent = message;
+}
+
+function setConnected(up, text) {
+  $("conn").className = "dot " + (up ? "up" : "down");
+  $("conn-text").textContent = text;
+}
+
+function duration(ms) {
+  if (ms == null) return "-";
+  if (ms < 1000) return ms + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(2) + "s";
+  return Math.floor(ms / 60000) + "m " + Math.round((ms % 60000) / 1000) + "s";
+}
+
+function card(value, label, cls) {
+  return `<div class="card"><div class="n ${cls || ""}">${esc(value)}</div>
+          <div class="l">${esc(label)}</div></div>`;
+}
+
+function table(element, headers, rows, onRowClick) {
+  const head = "<thead><tr>" + headers.map((h) =>
+    `<th${h.num ? ' class="num"' : ""}>${esc(h.label)}</th>`).join("") + "</tr></thead>";
+  const body = "<tbody>" + (rows.length
+    ? rows.map((row, i) =>
+        `<tr${onRowClick ? ' class="clickable" data-i="' + i + '"' : ""}>` +
+        row.map((cell, c) => `<td${headers[c] && headers[c].num ? ' class="num"' : ""}>${cell}</td>`).join("") +
+        "</tr>").join("")
+    : `<tr><td colspan="${headers.length}" class="muted">Nothing to show.</td></tr>`) + "</tbody>";
+  element.innerHTML = head + body;
+  if (onRowClick) {
+    element.querySelectorAll("tr.clickable").forEach((tr) =>
+      tr.addEventListener("click", () => onRowClick(Number(tr.dataset.i))));
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+async function loadStats() {
+  const stats = await api("/api/stats?runs=" + $("run-limit").value);
+  if (stats.ok === false) {
+    $("cards").innerHTML = `<div class="card"><div class="n muted">-</div>
+      <div class="l">${esc(stats.error || "no data")}</div></div>`;
+    return;
+  }
+
+  const rate = (stats.success_rate ?? 0).toFixed(1) + "%";
+  const rateClass = (stats.success_rate ?? 0) >= 99.5 ? "pass"
+    : (stats.success_rate ?? 0) >= 90 ? "time" : "fail";
+
+  $("cards").innerHTML =
+    card(stats.total_tests ?? 0, "tests run") +
+    card(stats.passed ?? 0, "passed", "pass") +
+    card(stats.failed ?? 0, "failed", "fail") +
+    card(stats.timeouts ?? 0, "timeouts", "time") +
+    card(stats.errors ?? 0, "errors", "err") +
+    card(stats.skipped ?? 0, "skipped", "skip") +
+    card(rate, "success rate", rateClass) +
+    card(duration(stats.average_run_duration_ms), "avg run");
+
+  table($("categories"),
+    [{ label: "Category" }, { label: "Count", num: true }],
+    (stats.failure_categories || []).map((entry) =>
+      [`<span class="badge fail">${esc(entry.category)}</span>`, entry.count]));
+
+  table($("top-failing"),
+    [{ label: "Test" }, { label: "Failures", num: true }],
+    (stats.top_failing_tests || []).map((entry) => [esc(entry.test), entry.failures]));
+
+  drawTrend(stats.recent_runs || []);
+}
+
+function drawTrend(runs) {
+  // Oldest on the left, so the eye reads left-to-right through time.
+  const ordered = runs.slice().reverse();
+  $("trend").innerHTML = ordered.map((run) => {
+    const total = run.total || 1;
+    const parts = [
+      ["pass", run.passed || 0],
+      ["fail", run.failed || 0],
+      ["time", run.timeouts || 0],
+      ["err", run.errors || 0],
+      ["skip", run.skipped || 0],
+    ].filter(([, n]) => n > 0);
+    const title = `${run.started_at} — ${run.passed}/${total} passed`;
+    return `<div class="col" title="${esc(title)}">` + parts.map(([cls, n]) =>
+      `<span style="height:${(n / total * 100).toFixed(1)}%;background:var(--${cls})"></span>`
+    ).join("") + "</div>";
+  }).join("");
+  $("trend-caption").textContent = ordered.length
+    ? `${ordered.length} run(s), oldest on the left`
+    : "no runs recorded yet";
+}
+
+async function loadRuns() {
+  const payload = await api("/api/runs?limit=" + $("run-limit").value);
+  state.runs = payload.runs || [];
+
+  table($("runs"), [
+    { label: "Run" }, { label: "Started" }, { label: "Total", num: true },
+    { label: "Passed", num: true }, { label: "Failed", num: true },
+    { label: "Rate", num: true }, { label: "Duration", num: true }, { label: "Filter" },
+  ], state.runs.map((run) => {
+    const s = run.statistics || {};
+    const rate = (s.success_rate ?? 0).toFixed(1) + "%";
+    return [
+      `<code>${esc((run.run_id || "").slice(0, 8))}</code>`,
+      esc(run.started_at),
+      s.total ?? 0,
+      `<span class="pass">${s.passed ?? 0}</span>`,
+      `<span class="fail">${s.failed ?? 0}</span>`,
+      rate,
+      duration(run.duration_ms),
+      `<span class="muted small">${esc(run.filter || "")}</span>`,
+    ];
+  }), (index) => selectRun(state.runs[index].run_id));
+
+  if (!state.selectedRun && state.runs.length) {
+    selectRun(state.runs[0].run_id);
+  }
+}
+
+async function selectRun(runId) {
+  state.selectedRun = runId;
+  $("results-heading").innerHTML =
+    `Results <span class="small muted">run ${esc((runId || "").slice(0, 8))}</span>`;
+
+  const payload = await api("/api/runs/" + encodeURIComponent(runId) + "/results");
+  const results = payload.results || [];
+
+  table($("results"), [
+    { label: "Status" }, { label: "Test" }, { label: "Category" },
+    { label: "Duration", num: true }, { label: "Message" },
+  ], results.map((result) => {
+    const cls = STATUS_CLASS[result.status] || "";
+    const detail = (result.error_detail || "").trim();
+    const message = esc((result.error_message || "").slice(0, 200)) +
+      (detail ? `<details><summary>detail</summary><pre>${esc(detail.slice(0, 4000))}</pre></details>` : "");
+    return [
+      `<span class="badge ${cls}">${esc(result.status)}</span>`,
+      esc(result.qualified_name),
+      result.failure_category === "NONE" ? '<span class="muted">—</span>' : esc(result.failure_category),
+      duration(result.duration_ms),
+      message,
+    ];
+  }));
+}
+
+async function loadFlaky() {
+  const payload = await api("/api/flaky?limit=15");
+  table($("flaky"),
+    [{ label: "Test" }, { label: "Runs", num: true }, { label: "Pass", num: true },
+     { label: "Fail", num: true }, { label: "Flip rate", num: true }],
+    (payload.candidates || []).map((entry) => [
+      esc(entry.test), entry.total_runs, entry.passes, entry.failures,
+      (entry.flip_rate ?? 0).toFixed(2),
+    ]));
+}
+
+async function loadDiagnostics() {
+  const payload = await api("/api/diagnostics");
+  const d = (payload.diagnostics || {});
+  const os = d.system?.os || {};
+  const cpu = d.system?.cpu || {};
+  const memory = d.system?.memory || {};
+  const gpu = d.gpu || {};
+
+  const row = (label, value) => value == null || value === ""
+    ? "" : `<tr><td class="muted">${esc(label)}</td><td>${esc(value)}</td></tr>`;
+
+  // The mock flag travels with the data everywhere, including here.
+  const gpuWarning = gpu.is_mock_data
+    ? `<p class="fail small"><strong>Note:</strong> the GPU values below are MOCK TEST DATA,
+       not readings from real hardware.</p>` : "";
+
+  $("diagnostics").innerHTML = gpuWarning + `<div class="scroll"><table>
+    ${row("distribution", os.distribution)}
+    ${row("kernel", os.kernel_version)}
+    ${row("architecture", os.architecture)}
+    ${row("in container", os.inside_container == null ? null : (os.inside_container ? "yes" : "no"))}
+    ${row("cpu", cpu.model)}
+    ${row("logical cores", cpu.logical_cores)}
+    ${row("load (1m)", cpu.load_average_1m)}
+    ${row("memory used", memory.used_percent == null ? null : memory.used_percent.toFixed(1) + "%")}
+    ${row("gpu", gpu.summary)}
+  </table></div>`;
+}
+
+async function runSmoke() {
+  const button = $("run-smoke");
+  button.disabled = true;
+  button.textContent = "Running…";
+  showError("");
+  try {
+    const payload = await api("/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ suite: "smoke", label: "dashboard" }),
+    });
+    if (payload.error) {
+      showError(payload.error.message || String(payload.error));
+    }
+    await refresh();
+  } catch (error) {
+    showError("could not start a run: " + error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Run smoke suite";
+  }
+}
+
+async function refresh() {
+  try {
+    const health = await api("/api/health");
+    setConnected(true, `${health.service} ${health.version} · ${health.tests_registered} tests registered`);
+    showError("");
+  } catch (error) {
+    setConnected(false, "cannot reach the API");
+    showError("The TestForge API is not reachable. Start it with: testforge serve --port 8080");
+    return;
+  }
+
+  // Each panel is loaded independently: one failing endpoint should not blank
+  // the whole page.
+  await Promise.allSettled([loadStats(), loadRuns(), loadFlaky(), loadDiagnostics()]);
+}
+
+$("refresh").addEventListener("click", refresh);
+$("run-limit").addEventListener("change", refresh);
+$("run-smoke").addEventListener("click", runSmoke);
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

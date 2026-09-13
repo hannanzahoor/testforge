@@ -1,0 +1,44 @@
+# Keep the build context small and reproducible. Without this, `docker build`
+# uploads the local build tree and dependency cache, which are both large and
+# host-specific.
+
+.git/
+.github/
+
+build/
+build-*/
+out/
+cmake-build-*/
+.deps-cache/
+_deps/
+compile_commands.json
+
+reports/
+artifacts/
+logs/
+*.log
+*.db
+*.db-wal
+*.db-shm
+benchmarks/results/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.env.*
+!.env.example
+
+.vscode/
+.idea/
+.clangd/
+*.swp
+
+docs/
+*.md
+!README.md

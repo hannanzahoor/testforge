@@ -1,0 +1,51 @@
+# Python-side tooling configuration.
+#
+# The C++ engine is the product; this file exists so the Python that surrounds
+# it (the AI sidecar, the evaluation harness, the sample service) is linted the
+# same way on every machine.
+#
+# Why this file exists at all: `ruff check` with no configuration uses whatever
+# default rule set the installed ruff happens to ship. That set has grown over
+# time, so an unconfigured repository passes CI today and fails it after an
+# unrelated ruff release — the lint result becomes a property of the week
+# rather than of the code. Pinning target-version and the rule selection makes
+# the result reproducible.
+
+[project]
+# Declared because the code uses X | None and dict[str, ...] in runtime
+# annotations that pydantic evaluates, which needs 3.10. Without this a
+# 3.9 install fails at import with an unhelpful TypeError rather than a
+# clear version error.
+name = "testforge-python"
+version = "0.9.0"
+description = "Python side of TestForge: sample service, AI sidecar, evaluation harness."
+requires-python = ">=3.10"
+
+[tool.ruff]
+# 3.10, deliberately lower than the 3.11 the Dockerfiles and CI jobs run.
+#
+# 3.10 is what actually buys something: built-in generics (dict[str, X], 3.9)
+# and X | None (3.10) both work there. Declaring 3.11 would additionally have
+# rewritten timezone.utc to datetime.UTC — a 3.11-only alias for the identical
+# object — which breaks the service on 3.10 in exchange for nothing. The floor
+# should be set by the oldest version the code can actually support, not by the
+# newest one the deployment images happen to ship.
+target-version = "py310"
+line-length = 100
+
+extend-exclude = [".deps-cache", "build", "build-*"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes — the unused import that started this
+    "I",    # import sorting
+    "UP",   # pyupgrade — keeps annotations at the declared target version
+    "B",    # bugbear — mutable defaults, shadowed loop vars
+    "SIM",  # simplifiable constructs
+    "RUF",  # ruff's own, including unused-noqa
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files legitimately assert on constructed values and use long literals.
+"sample-service/tests/*" = ["E501"]

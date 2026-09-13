@@ -1,0 +1,106 @@
+# The whole stack, for people who would rather not install a C++ toolchain.
+#
+#   docker compose up --build sample-service          # just the system under test
+#   docker compose run --rm testforge run --suite api # run the API suite against it
+#   docker compose up --build server                  # REST API + dashboard on :8080
+#   docker compose --profile ai up --build            # add the AI sidecar
+#
+# Everything binds to 127.0.0.1 on the host. See docs/security.md: the REST API
+# has no authentication and POST /api/runs executes tests, so it belongs on a
+# developer machine or inside a CI network, not on a public interface.
+
+name: testforge
+
+services:
+  # ---------------------------------------------------------------------
+  # The system under test.
+  # ---------------------------------------------------------------------
+  sample-service:
+    build:
+      context: ./sample-service
+    image: testforge/sample-service:local
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      SAMPLE_API_TOKEN: ${SAMPLE_API_TOKEN:-testforge-demo-token}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # ---------------------------------------------------------------------
+  # One-shot test runner. `docker compose run --rm testforge <args>`.
+  # ---------------------------------------------------------------------
+  testforge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_TYPE: RelWithDebInfo
+        BUILD_TESTS: "ON"
+    image: testforge/engine:local
+    depends_on:
+      sample-service:
+        condition: service_healthy
+    environment:
+      # Service-to-service inside the compose network, not localhost.
+      TESTFORGE_API_BASE_URL: http://sample-service:8000
+      TESTFORGE_DB_PATH: /app/data/testforge.db
+      TESTFORGE_REPORT_DIR: /app/reports
+      TESTFORGE_AI_ENDPOINT: http://ai-sidecar:8810
+    volumes:
+      - testforge-data:/app/data
+      - ./reports:/app/reports
+    # Overridden on the command line; this is the useful default.
+    command: ["run", "--suite", "api"]
+
+  # ---------------------------------------------------------------------
+  # Long-running REST API and dashboard.
+  # ---------------------------------------------------------------------
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: testforge/engine:local
+    depends_on:
+      sample-service:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      TESTFORGE_API_BASE_URL: http://sample-service:8000
+      TESTFORGE_DB_PATH: /app/data/testforge.db
+      TESTFORGE_REPORT_DIR: /app/reports
+      TESTFORGE_SERVER_HOST: 0.0.0.0
+      TESTFORGE_AI_ENDPOINT: http://ai-sidecar:8810
+    volumes:
+      - testforge-data:/app/data
+      - ./reports:/app/reports
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080"]
+
+  # ---------------------------------------------------------------------
+  # AI sidecar. Opt-in: `docker compose --profile ai up`.
+  #
+  # Without OPENAI_API_KEY it still starts and answers /health with
+  # ready=false, so `testforge ai status` explains what is missing instead of
+  # timing out.
+  # ---------------------------------------------------------------------
+  ai-sidecar:
+    profiles: ["ai"]
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: testforge/ai-sidecar:local
+    ports:
+      - "127.0.0.1:8810:8810"
+    environment:
+      # Read from the host environment or a .env file — never committed, and
+      # never baked into the image.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TESTFORGE_AI_MODEL: ${TESTFORGE_AI_MODEL:-gpt-4o-mini}
+      TESTFORGE_AI_LOG_LEVEL: ${TESTFORGE_AI_LOG_LEVEL:-INFO}
+
+volumes:
+  testforge-data:

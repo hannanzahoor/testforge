@@ -1,0 +1,13 @@
+# Sample service (the system under test).
+#
+# Pinned to minor versions: the point of this service is to behave identically
+# on every machine, and an unpinned FastAPI upgrade changing a validation
+# error code would show up as a mysterious TestForge failure.
+fastapi>=0.110,<0.116
+uvicorn[standard]>=0.27,<0.35
+pydantic>=2.6,<3
+email-validator>=2.1,<3
+
+# Test dependencies for the service's own pytest suite.
+pytest>=8.0,<9
+httpx>=0.26,<0.29

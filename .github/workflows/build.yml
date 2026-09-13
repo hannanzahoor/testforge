@@ -1,0 +1,102 @@
+# Build matrix.
+#
+# Proves the project builds from a clean checkout on more than one compiler and
+# more than one build type, which is the cheapest way to catch the two classes
+# of problem that only show up elsewhere: a warning that is an error on Clang,
+# and an optimisation that changes behaviour in Release.
+
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run for the same ref.
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-22.04
+
+    strategy:
+      # One failing cell should not hide the results of the others.
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug, Release]
+
+    env:
+      CC: ${{ matrix.compiler == 'gcc' && 'gcc-11' || 'clang-14' }}
+      CXX: ${{ matrix.compiler == 'gcc' && 'g++-11' || 'clang++-14' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            sudo apt-get install --no-install-recommends -y clang-14
+          fi
+
+      # FetchContent downloads GoogleTest and the SQLite amalgamation. Caching
+      # them turns a ~40s step into a few seconds and removes a dependency on
+      # sqlite.org being reachable.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: .deps-cache
+          key: deps-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DTESTFORGE_BUILD_TESTS=ON \
+            -DTESTFORGE_BUILD_EXAMPLES=ON \
+            -DTESTFORGE_BUILD_BENCHMARKS=ON \
+            -DTESTFORGE_WERROR=ON
+
+      # -DTESTFORGE_WERROR=ON above is the point of this job: a warning that
+      # only one of the two compilers emits still fails the build.
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Smoke-check the binary
+        run: |
+          ./build/testforge --version
+          ./build/testforge list --suite smoke
+          ./build/testforge run --suite smoke --no-db --no-report
+
+      - name: Upload the binary
+        if: matrix.compiler == 'gcc' && matrix.build_type == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testforge-linux-x86_64
+          path: |
+            build/testforge
+            build/testforge_bench
+          retention-days: 14
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The engine image runs the test-suite as part of its own build, so this
+      # job doubles as a from-scratch verification with no cached state.
+      - name: Build the engine image
+        run: docker build --build-arg BUILD_TESTS=ON -t testforge/engine:ci .
+
+      - name: Build the sample-service image
+        run: docker build -t testforge/sample-service:ci ./sample-service
+
+      - name: Check the entrypoint
+        run: docker run --rm testforge/engine:ci version

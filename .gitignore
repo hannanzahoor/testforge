@@ -1,0 +1,69 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+_deps/
+.deps-cache/
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+install_manifest.txt
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+
+# TestForge runtime artefacts
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+reports/
+artifacts/
+logs/
+*.log
+benchmarks/results/
+
+# Secrets. Never commit real credentials.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build-python/
+
+# Node (dashboard tooling, if ever added)
+node_modules/
+
+# Editors and IDEs
+.vscode/
+.idea/
+.cache/
+.clangd/
+*.swp
+*.swo
+*~
+cmake-build-debug/
+cmake-build-release/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
